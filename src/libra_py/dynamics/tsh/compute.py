@@ -556,7 +556,8 @@ def run_dynamics(dyn_var, _dyn_params, ham, compute_model, _model_params, rnd):
 
     #================= Surface hopping: proposal, acceptance =======================
     default_params.update( { "tsh_method":-1, "hop_acceptance_algo":0, "momenta_rescaling_algo":0,
-                             "use_boltz_factor":0
+                             "use_boltz_factor":0, "use_ETSH":0, "ETSH_algo":1, "max_dist_bundle":1.0,
+                             "ETSH_w_dof":MATRIX(dyn_var.ndof, 1)
                            } )
 
     #================= Decoherence options =========================================

@@ -87,6 +87,10 @@ void export_dyn_control_params_objects(){
       .def_readwrite("hop_acceptance_algo", &dyn_control_params::hop_acceptance_algo)
       .def_readwrite("momenta_rescaling_algo", &dyn_control_params::momenta_rescaling_algo)
       .def_readwrite("use_boltz_factor", &dyn_control_params::use_boltz_factor)
+      .def_readwrite("use_ETSH", &dyn_control_params::use_ETSH)
+      .def_readwrite("ETSH_algo", &dyn_control_params::ETSH_algo)
+      .def_readwrite("max_dist_bundle", &dyn_control_params::max_dist_bundle)
+      .def_readwrite("ETSH_w_dof", &dyn_control_params::ETSH_w_dof)
 
       ///================= Decoherence options =========================================
       .def_readwrite("decoherence_algo", &dyn_control_params::decoherence_algo)

@@ -370,7 +370,33 @@ class dyn_control_params{
   */
    int use_boltz_factor;
 
+   /**
+     A flag to use the ensemble TSH scheme to compute the hopping probability
 
+     - 0: don't use [ default ]
+     - 1: use
+   */
+   int use_ETSH;
+
+   /**
+     The scheme to construct the density matrix in ensemble TSH
+   
+     Options:
+
+       - 0: construction using coefficients (wf)
+       - 1: construction using active states and coefficients (cc) [ default ]
+   */
+   int ETSH_algo; 
+
+   /**
+     The distance threshold for bundling a set of trajectories in the ensemble SH 
+   */
+   double max_dist_bundle;
+  
+   /**
+     MATRIX(ndof, 1) initial width parameter for each nuclear DOFs in the ensemble SH [ default: NULL ]
+   */
+   MATRIX* ETSH_w_dof;
   
   ///===============================================================================
   ///================= Decoherence options =========================================

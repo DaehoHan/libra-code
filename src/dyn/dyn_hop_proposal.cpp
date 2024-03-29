@@ -953,7 +953,170 @@ vector<double> hopping_probabilities_mash(dyn_control_params& prms, CMATRIX& den
   return g;
 }
 
+vector<CMATRIX> compute_ETSH_dm(dyn_control_params& prms, dyn_variables& dyn_var){
+  int ntraj = dyn_var.ntraj;
+  int nstates = dyn_var.nadi;
+  int ndof = dyn_var.ndof; 
 
+  int i, j, dof, traj_j, traj_k;
+  
+  // Compute the Gaussian kernel
+  MATRIX inv_h_dof(ndof, 1);
+  for(dof=0; dof<ndof; dof++){
+    inv_h_dof.set(dof, 0, (1.0/prms.ETSH_w_dof->get(dof,0)) );
+  } 
+  inv_h_dof *= pow(4/(ntraj*(ndof+2)), -1/(ndof+4));
+
+  MATRIX G_jk(ntraj, ntraj);
+
+  MATRIX dq(ndof, 1);
+  double norm;
+  for(traj_j=0; traj_j<ntraj; traj_j++){
+    norm = 0.0;
+    for(traj_k=0; traj_k<ntraj; traj_k++){
+      dq.dot_product(dyn_var.q->col(traj_k) - dyn_var.q->col(traj_j), inv_h_dof);
+      G_jk.set(traj_j, traj_k, exp( -0.5* (dq.T()*dq).get(0,0)) );
+      norm += G_jk.get(traj_j, traj_k);
+    }
+    G_jk.scale(traj_j, -1, 1.0/norm);
+  }
+
+  // Construct ensemble density
+  vector<CMATRIX> DM_out;
+
+  vector<CMATRIX> dm_wf;
+  vector<CMATRIX>  dm_half_as;
+  vector<CMATRIX>  dm_abs_as;
+  vector<CMATRIX>  sgn_dm_wf;
+  for(int traj=0; traj<ntraj; traj++){
+    DM_out.push_back(CMATRIX(nstates, nstates));
+
+    dm_wf.push_back(CMATRIX(nstates, nstates));
+    dm_half_as.push_back(CMATRIX(nstates, 1));
+    dm_abs_as.push_back(CMATRIX(nstates, nstates));
+    sgn_dm_wf.push_back(CMATRIX(nstates, nstates));
+  }
+
+  for(traj_j=0; traj_j<ntraj; traj_j++){
+    
+    // Make the wf density matrix
+    for(traj_k=0; traj_k<ntraj; traj_k++){
+      if(prms.rep_tdse==0 || prms.rep_tdse==2){ dm_wf[traj_j] += *dyn_var.dm_dia[traj_k]*G_jk.get(traj_j, traj_k); }
+      else{ dm_wf[traj_j] += *dyn_var.dm_adi[traj_k]*G_jk.get(traj_j, traj_k); }
+    }
+
+    if(prms.ETSH_algo == 1){
+      // magnitudes
+      for(traj_k=0; traj_k<ntraj; traj_k++){
+        dm_half_as[traj_j].add(dyn_var.act_states[traj_k], 0, complex<double>(1.0*G_jk.get(traj_j, traj_k), 0.0) );
+      }
+
+      for(i=0; i<nstates; i++){
+        dm_half_as[traj_j].set(i, 0, complex<double>(sqrt(dm_half_as[traj_j].get(i, 0).real()), 0.0) );
+      }
+      
+      dm_abs_as[traj_j] = dm_half_as[traj_j] * dm_half_as[traj_j].H();
+      
+      // phases
+      for(i=0; i<nstates; i++){
+        for(j=0; j<nstates; j++){
+          complex<double> val = dm_wf[traj_j].get(i, j);
+          complex<double> phase = (val == complex<double>(0.0, 0.0)) ? complex<double>(0.0, 0.0) : val / fabs(val);
+          sgn_dm_wf[traj_j].set(i,j, phase);
+        }
+      }
+    }
+  }
+
+  if(prms.ETSH_algo == 1){
+    CMATRIX tmp(nstates, nstates);
+    for(traj_j=0; traj_j<ntraj; traj_j++){
+      CMATRIX dm_cc(nstates, nstates);
+      for(traj_k=0; traj_k<ntraj; traj_k++){
+        tmp.dot_product(dm_abs_as[traj_k], sgn_dm_wf[traj_k]);
+        //cout << traj_j << ", " << traj_k <<endl; 
+        //tmp.show_matrix();
+        dm_cc += tmp*G_jk.get(traj_j, traj_k);
+      }
+
+      DM_out[traj_j] = dm_cc;
+    }
+  }
+  else{
+    for(traj_j=0; traj_j<ntraj; traj_j++){
+      DM_out[traj_j] = dm_wf[traj_j];
+    }
+  }
+  
+  return DM_out;
+}
+
+CMATRIX calculate_ensemble_dm(dyn_control_params& prms, dyn_variables& dyn_var, int traj_t){
+
+  int ntraj = dyn_var.ntraj;
+  int nstates = dyn_var.nadi;
+  int ndof = dyn_var.ndof; 
+
+  int i, j, traj;
+  int ntraj_t;
+  double dist;
+
+  CMATRIX dm(nstates, nstates);
+  MATRIX q_t(ndof, 1);
+  MATRIX q_temp(ndof, 1);
+  vector<int> in_bundle(ntraj, 0);
+  
+  q_t = dyn_var.q->col(traj_t);
+  ntraj_t = 0; // count the trajectories "near" the target one
+
+  // construct the density matrix using the coefficients
+  for(traj=0; traj<ntraj; traj++){
+
+    if (traj_t == traj){
+      dist = 0.0;
+    }
+    else{
+      q_temp = dyn_var.q->col(traj);
+      dist = sqrt( ((q_temp - q_t).T() * (q_temp - q_t)).get(0,0) );
+    }
+
+    if(dist < prms.max_dist_bundle){
+      ntraj_t += 1;
+      in_bundle[traj] = 1;
+      if (prms.rep_tdse==0 || prms.rep_tdse==2){ dm += *dyn_var.dm_dia[traj]; }
+      else{ dm += *dyn_var.dm_adi[traj]; }
+    }
+  }
+  dm /= ntraj_t;
+
+  // further construction with active states
+  if(prms.ETSH_algo == 1){
+    vector<int> act_states(nstates, 0);
+    MATRIX rho_as(nstates, nstates);
+    CMATRIX rho_wf(nstates, nstates);
+    complex<double> phase;
+
+    rho_wf = dm;
+
+    for(traj=0; traj<ntraj; traj++){
+      if (in_bundle[traj] == 1){
+        int a = dyn_var.act_states[traj];
+        rho_as.add(a,a, 1.0);
+      }
+    }//traj
+    rho_as /= ntraj_t;
+        
+    for(i=0; i<nstates; i++){
+      for(j=0; j<nstates; j++){
+        phase = (rho_wf.get(i,j) == complex<double>(0.0, 0.0)) ? complex<double>(0.0, 0.0) : 
+          rho_wf.get(i,j) / abs(rho_wf.get(i,j));
+        dm.set( i,j, complex<double> (sqrt(rho_as.get(i,i)*rho_as.get(j,j)), 0.0) * phase );
+      }
+    }
+  }
+
+  return dm;
+}
 
 /*
 vector<MATRIX> hop_proposal_probabilities(dyn_control_params& prms,
@@ -1087,13 +1250,62 @@ nHamiltonian& ham, nHamiltonian& ham_prev){
   CMATRIX coeff(nst, 1);
   CMATRIX Hvib(nst, nst);
   vector<int> fstates(ntraj,0); 
+  
+  vector<CMATRIX> dm_tr;
 
   //============== Begin the TSH part ===================  
+
+  if(prms.use_ETSH == 1 and ( prms.ETSH_algo == -1 or prms.ETSH_algo == -2) ){
+    CMATRIX dm_wf(nst, nst);
+    for(traj=0; traj<ntraj; traj++){
+      CMATRIX& dm = *dyn_var.dm_adi[traj];
+      if(prms.rep_tdse==0 || prms.rep_tdse==2){ dm = *dyn_var.dm_dia[traj]; }
+        
+      dm_wf += dm;
+    }
+    dm_wf /= ntraj;
+      
+    for(traj=0; traj<ntraj; traj++){
+      dm_tr[traj] = dm_wf;
+    }
+
+    if(prms.ETSH_algo == -2){
+      MATRIX dm_as(nst, nst);
+      for(traj=0; traj<ntraj; traj++){
+        int a = dyn_var.act_states[traj];
+        dm_as.add(a,a, 1.0);
+      }
+      dm_as /= ntraj;
+
+      CMATRIX dm_cc(nst, nst);
+      complex<double> phase;
+      for(int i=0; i<nst; i++){
+        for(int j=0; j<nst; j++){
+          phase = (dm_wf.get(i,j) == complex<double>(0.0, 0.0)) ? complex<double>(0.0, 0.0) : 
+            dm_wf.get(i,j) / abs(dm_wf.get(i,j));
+          dm_cc.set( i,j, complex<double> (sqrt(dm_as.get(i,i)*dm_as.get(j,j)), 0.0) * phase );
+        }  
+      }
+      
+      for(traj=0; traj<ntraj; traj++){
+        dm_tr[traj] = dm_cc;
+      }
+    }
+  }
+  else if(prms.use_ETSH==1){
+    for(traj=0; traj<ntraj; traj++){
+      dm_tr.push_back(CMATRIX(nst, nst));
+    }
+    dm_tr = compute_ETSH_dm(prms, dyn_var);
+  }
+
   // Proposed hops probabilities
   for(traj=0; traj<ntraj; traj++){
 
     CMATRIX& dm = *dyn_var.dm_adi[traj];
     if(prms.rep_tdse==0 || prms.rep_tdse==2){ dm = *dyn_var.dm_dia[traj]; }
+    
+    if(prms.use_ETSH==1){ dm = dm_tr[traj];}
 
     nucl_stenc_y[0] = traj;
     el_stenc_y[0] = traj;

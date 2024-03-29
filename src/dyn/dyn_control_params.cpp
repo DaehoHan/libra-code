@@ -65,6 +65,10 @@ dyn_control_params::dyn_control_params(){
   hop_acceptance_algo = 0;
   momenta_rescaling_algo = 0;
   use_boltz_factor = 0;
+  use_ETSH = 0;
+  ETSH_algo = 1;
+  max_dist_bundle = 1.0;
+  ETSH_w_dof = NULL;
 
   ///================= Decoherence options =========================================
   decoherence_algo = -1; 
@@ -152,6 +156,11 @@ dyn_control_params::dyn_control_params(const dyn_control_params& x){
   hop_acceptance_algo = x.hop_acceptance_algo;
   momenta_rescaling_algo = x.momenta_rescaling_algo;
   use_boltz_factor = x.use_boltz_factor;
+  use_ETSH = x.use_ETSH;
+  ETSH_algo = x.ETSH_algo;
+  max_dist_bundle = x.max_dist_bundle;
+  ETSH_w_dof = new MATRIX( x.ETSH_w_dof->n_rows, x.ETSH_w_dof->n_cols );
+  *ETSH_w_dof = *x.ETSH_w_dof;
 
   ///================= Decoherence options =========================================
   decoherence_algo = x.decoherence_algo; 
@@ -327,6 +336,16 @@ void dyn_control_params::set_parameters(bp::dict params){
     else if(key=="hop_acceptance_algo") { hop_acceptance_algo = bp::extract<int>(params.values()[i]);  }
     else if(key=="momenta_rescaling_algo"){ momenta_rescaling_algo = bp::extract<int>(params.values()[i]);  }
     else if(key=="use_boltz_factor"){ use_boltz_factor = bp::extract<int>(params.values()[i]);  }
+    else if(key=="use_ETSH"){ use_ETSH = bp::extract<int>(params.values()[i]);  }
+    else if(key=="ETSH_algo"){ ETSH_algo = bp::extract<int>(params.values()[i]);  }
+    else if(key=="max_dist_bundle") { max_dist_bundle = bp::extract<double>(params.values()[i]);  }
+    else if(key=="ETSH_w_dof"){ 
+      MATRIX x( bp::extract<MATRIX>(params.values()[i]) );
+      ETSH_w_dof = new MATRIX(x.n_rows, x.n_cols);      
+      for(int a=0;a<x.n_rows;a++){
+        for(int b=0;b<x.n_cols;b++){ ETSH_w_dof->set(a, b, x.get(a,b));   }
+      } 
+    }
 
     ///================= Decoherence options =========================================
     else if(key=="decoherence_algo"){ decoherence_algo = bp::extract<int>(params.values()[i]); }
