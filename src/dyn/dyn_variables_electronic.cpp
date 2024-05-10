@@ -420,6 +420,11 @@ void dyn_variables::init_amplitudes(bp::dict _params, Random& rnd){
                     Designed for MASH dynamics
                     Uses "istates" instead of the "istate", similar to the types 2 and 3
 
+                - 5 : initialize all states according to "extern_coef" - nstates x 1 CMATRIX for
+                    directly giving the initial coefficient; the active states are initialized
+                    according to variable "istates"
+                    Uses "istates" instead of the "istate", similar to the types 2 and 3
+
             * **params["nstates"]** ( int ): the number of electronic states in the basis
                 [ default: 1 ]
 
@@ -470,6 +475,7 @@ void dyn_variables::init_amplitudes(bp::dict _params, Random& rnd){
   default_params["rep"] = 1;
   default_params["is_nbra"] = 0;
   default_params["verbosity"] = 0;
+  default_params["extern_coef"] = CMATRIX(nadi, 1); // used when init_type == 5
 
   check_input(params, default_params, critical_params);
 
@@ -504,9 +510,9 @@ void dyn_variables::init_amplitudes(bp::dict _params, Random& rnd){
            the rep = "<<rep<<" is not known. Allowed values are: [0, 1]\n";
   }
 
-  if(! (init_type==0 || init_type==1 || init_type==2 || init_type==3 || init_type==4)){
+  if(! (init_type==0 || init_type==1 || init_type==2 || init_type==3 || init_type==4 || init_type==5)){
     cout<<"WARNINIG in init_amplitudes:\
-           the init_type = "<<init_type<<" is not known. Allowed values are: [0, 1, 2, 3, 4]\n";
+           the init_type = "<<init_type<<" is not known. Allowed values are: [0, 1, 2, 3, 4, 5]\n";
   }
   
   if(init_type==0 || init_type==1){
@@ -617,6 +623,31 @@ void dyn_variables::init_amplitudes(bp::dict _params, Random& rnd){
 
         if(rep==0){ ampl_dia->set(i, traj, ampl );  }
         else if(rep==1){ ampl_adi->set(i, traj, ampl);  }
+      }
+    }
+
+    else if(init_type==5){
+      if(verbosity > 0){
+        cout<<"======= Initialization type is "<<init_type<<" ========\n";
+        cout<<"setting representation "<<rep<<" coefficients C_i for all i to complex numbers such that populations are sampled evenly \n";
+      }
+
+      CMATRIX coef(istates.size(), 1);
+
+      for(int i=0;i<len(params.values());i++){
+        key = bp::extract<std::string>(params.keys()[i]);
+        if(key=="extern_coef") {  coef = bp::extract<CMATRIX>(params.values()[i]); }
+      }// for i
+      
+      if(rep==0){
+        for(i=0; i<istates.size(); i++){
+          ampl_dia->set(i, traj, coef.get(i,0));
+        }
+      }
+      else if(rep==1){
+        for(i=0; i<istates.size(); i++){
+          ampl_adi->set(i, traj, coef.get(i,0));
+        }
       }
     }
 
@@ -786,7 +817,7 @@ void dyn_variables::init_active_states(bp::dict _params, Random& rnd){
            the rep = "<<rep<<" is not known. Allowed values are: [0, 1]\n";
   }
 
-  if(! (init_type==0 || init_type==1 || init_type==2 || init_type==3 || init_type==4) ){
+  if(! (init_type==0 || init_type==1 || init_type==2 || init_type==3 || init_type==4 || init_type==5) ){
     cout<<"WARNINIG in init_active_states:\
            the init_type = "<<init_type<<" is not known. Allowed values are: [0, 1, 2, 3, 4]\n";
   }
@@ -802,7 +833,7 @@ void dyn_variables::init_active_states(bp::dict _params, Random& rnd){
     }
   }
 
-  if(init_type==2 || init_type==3){
+  if(init_type==2 || init_type==3 || init_type==5){
     if(istates.size()!=ndia && rep==0){
       cout<<"ERROR in init_active_states: the istates array is of length = "<<istates.size()<<", but should be of length "<<ndia<<"\n";
       exit(0);
@@ -832,7 +863,7 @@ void dyn_variables::init_active_states(bp::dict _params, Random& rnd){
     if(init_type==0 || init_type==1 || init_type==4){ 
       act_states.push_back(istate);
     }
-    else if(init_type==2 || init_type==3){
+    else if(init_type==2 || init_type==3 || init_type==5){
       ksi = rnd.uniform(0.0, 1.0);
       act_states.push_back( liblibra::libspecialfunctions::set_random_state(istates, ksi) );
     }
