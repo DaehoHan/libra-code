@@ -392,8 +392,9 @@ void update_proj_adi(dyn_control_params &prms, dyn_variables &dyn_var,
                prms.state_tracking_algo == 21 ||
                prms.state_tracking_algo == 3 ||
                prms.state_tracking_algo == 32 ||
+               prms.state_tracking_algo == 33 ||
                prms.state_tracking_algo ==
-                   33) { // This is based on reordering + phase correction
+                   5) { // This is based on projector correction from the time-overlap
       CMATRIX Eadi(ham->get_ham_adi());
       T_new = P;
       T_new = compute_projector(prms, Eadi, T_new);

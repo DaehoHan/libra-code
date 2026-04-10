@@ -33,6 +33,7 @@
 #include "Surface_Hopping.h"
 #include "Energy_and_Forces.h"
 #include "Dynamics.h"
+#include "../math_meigen/mEigen.h"
 #include "../util/libutil.h"
 #include "dyn_control_params.h"
 #include "../math_specialfunctions/libspecialfunctions.h"
@@ -42,6 +43,7 @@
 namespace liblibra{
 
 using namespace libspecialfunctions;
+using namespace libmeigen;
 
 /// libdyn namespace
 namespace libdyn{
@@ -719,6 +721,89 @@ vector<int> get_stochastic_reordering3(CMATRIX& time_overlap, Random& rnd, int c
 }
 
 
+double zhou_parallel_transport_delta(CMATRIX& U, int j, int k){
+/**
+  Compute the pair-flip score from Zhou et al. JCTC 2020, Section 2.2.1.
+  If the returned value is negative, simultaneously flipping columns j and k
+  lowers the approximate objective Re Tr(3 U^2 - 16 U) while keeping det(U)=+1.
+*/
+
+  int nst = U.n_rows;
+
+  double ujj = U.get(j, j).real();
+  double ukk = U.get(k, k).real();
+  double ujk = U.get(j, k).real();
+  double ukj = U.get(k, j).real();
+
+  double sum_term = 0.0;
+  for(int l=0; l<nst; l++){
+    sum_term += 3.0 * (
+      U.get(j, l).real() * U.get(l, j).real() +
+      U.get(k, l).real() * U.get(l, k).real()
+    );
+  }
+
+  return 3.0 * (ujj * ujj + ukk * ukk)
+       + 6.0 * (ujk * ukj)
+       + 8.0 * (ujj + ukk)
+       - sum_term;
+}
+
+
+void flip_column_sign(CMATRIX& M, int col_indx){
+  M.scale(-1, col_indx, complex<double>(-1.0, 0.0));
+}
+
+
+CMATRIX compute_zhou_parallel_transport_projector(CMATRIX& St){
+/**
+  Real-regime phase tracker of Zhou et al. JCTC 2020, Section 2.2.1.
+  Returns a diagonal +/-1 projector that chooses column signs for St while
+  enforcing det(St)=+1 and iteratively lowering the pair-flip objective.
+*/
+
+  int nst = St.n_rows;
+  CMATRIX U(St);
+  CMATRIX res(nst, nst);
+  res.load_identity();
+
+  const double det_tol = 1e-8;
+  const double sweep_tol = 1e-12;
+
+  complex<double> det_u = det(U);
+  if(std::abs(det_u.imag()) > det_tol){
+    cout<<"Warning in compute_zhou_parallel_transport_projector: imaginary part of det(St) = "
+        <<det_u.imag()<<" is not negligible. Using the real-regime algorithm anyway.\n";
+  }
+
+  if(det_u.real() < 0.0){
+    flip_column_sign(U, 0);
+    res.set(0, 0, complex<double>(-1.0, 0.0));
+  }
+
+  bool converged = false;
+  while(!converged){
+    converged = true;
+
+    for(int j=0; j<nst; j++){
+      for(int k=j+1; k<nst; k++){
+        double delta = zhou_parallel_transport_delta(U, j, k);
+        if(delta < -sweep_tol){
+          flip_column_sign(U, j);
+          flip_column_sign(U, k);
+
+          res.set(j, j, -res.get(j, j));
+          res.set(k, k, -res.get(k, k));
+          converged = false;
+        }
+      }
+    }
+  }
+
+  return res;
+}
+
+
 void update_projectors(dyn_control_params& prms, vector<CMATRIX>& projectors, 
   vector<CMATRIX>& Eadi, vector<CMATRIX>& St, Random& rnd){
 
@@ -742,6 +827,14 @@ void update_projectors(dyn_control_params& prms, vector<CMATRIX>& projectors,
 
     projector_old = projectors[traj];
     st = St[traj];
+
+    if(prms.state_tracking_algo==5){
+      CMATRIX p_i(nst, nst);
+      st = projector_old.H() * st;
+      p_i = compute_zhou_parallel_transport_projector(st);
+      projectors[traj] = projector_old * p_i;
+      continue;
+    }
 
     if(prms.state_tracking_algo==1){
         perm_t = get_reordering(st);
@@ -921,6 +1014,7 @@ CMATRIX compute_projector(dyn_control_params& prms, CMATRIX& Eadi, CMATRIX& St){
   if(prms.state_tracking_algo==1){ perm_t = get_reordering(st);  }
   else if(prms.state_tracking_algo==2 || prms.state_tracking_algo==4){ perm_t = Munkres_Kuhn(st, Eadi, prms.MK_alpha, prms.MK_verbosity); }
   else if(prms.state_tracking_algo==21){ perm_t = hungarian_algorithm(st, Eadi, prms.MK_alpha);     }
+  else if(prms.state_tracking_algo==5){ return compute_zhou_parallel_transport_projector(st); }
 
 /*
   else if(prms.state_tracking_algo==3){ perm_t = get_stochastic_reordering(st, rnd);   }

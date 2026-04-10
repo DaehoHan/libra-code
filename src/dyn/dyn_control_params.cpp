@@ -301,11 +301,17 @@ void dyn_control_params::sanity_check(){
      state_tracking_algo==0 || state_tracking_algo==1 ||
      state_tracking_algo==2 || state_tracking_algo==21 || 
      state_tracking_algo==3 || state_tracking_algo==32 || state_tracking_algo==33 ||
-     state_tracking_algo==4){ ; ; }
+     state_tracking_algo==4 || state_tracking_algo==5){ ; ; }
   else{
     std::cout<<"Error in dyn_control_params::sanity_check: state_tracking_algo = "
         <<state_tracking_algo<<" is not allowed\nExiting...\n";
     exit(0);
+  }
+
+  if(state_tracking_algo==5 && (do_phase_correction!=0 || do_nac_phase_correction!=0)){
+    cout<<"Warning in dyn_control_params::sanity_check: state_tracking_algo == 5 already performs "
+        <<"phase selection internally and is intended for do_phase_correction = 0 and "
+        <<"do_nac_phase_correction = 0\n";
   }
 
   /// Shall not use DISH with the decoherence correction

@@ -51,6 +51,7 @@ vector<int> get_stochastic_reordering3(CMATRIX& time_overlap, Random& rnd,
 vector<int> permute_states(vector<vector<int> >& perms, vector<int>& act_states);
 
 CMATRIX permutation2cmatrix(vector<int>& permutation);
+CMATRIX compute_zhou_parallel_transport_projector(CMATRIX& St);
 void update_projectors(dyn_control_params& prms, vector<CMATRIX>& projectors, 
   vector<CMATRIX>& Eadi, vector<CMATRIX>& St, Random& rnd);
 

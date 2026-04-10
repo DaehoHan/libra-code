@@ -216,6 +216,8 @@ def run_dynamics(dyn_var, _dyn_params, ham, compute_model, _model_params, rnd):
                 - 32: experimental stochastic algorithms with all permutations (too expensive)
                 - 33: the improved stochastic algorithm with good scaling and performance, on par with the mincost
                 - 4: new, experimental force-based tracking
+                - 5: Zhou et al. parallel-transport sign tracking for real overlaps; intended to be used
+                     with `do_phase_correction = 0` and `do_nac_phase_correction = 0`
 
 
             * **dyn_params["MK_alpha"]** ( double ): Munkres-Kuhn alpha
