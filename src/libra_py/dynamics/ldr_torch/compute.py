@@ -46,10 +46,10 @@ class ldr_solver:
         self.p0 = torch.tensor(params.get("p0", [0.0]), dtype=torch.float64, device=self.device)
         self.k = torch.tensor(params.get("k", [0.001]), dtype=torch.float64, device=self.device)
         self.mass = torch.tensor(params.get("mass", [2000.0]), dtype=torch.float64, device=self.device)
-        self.alpha = torch.tensor(params.get("alpha", [18.0]), dtype=torch.float64, device=self.device)
         self.qgrid = torch.tensor(params.get("qgrid", [[-10 + i * 0.1] for i in range(int((10 - (-10)) / 0.1) + 1)] ), dtype=torch.float64, device=self.device) #(N, D)
         self.ngrids = len(self.qgrid) # N
         self.ndof = self.qgrid.shape[1] 
+        self.alpha = torch.tensor(params.get("alpha", torch.full_like(self.qgrid, 18.0)), dtype=torch.float64, device=self.device)
         self.nstates = params.get("nstates", 2)
         self.istate = params.get("istate", 0)
         self.elec_ampl = params.get("elec_ampl", torch.tensor([1.0+0.j]*self.ngrids, dtype=torch.cdouble))
@@ -94,20 +94,28 @@ class ldr_solver:
         Compute nuclear overlap matrix s_nucl[i, j] for the mesh qmesh 
         from the Gaussian basis, g(x; q) = \exp(-\alpha * (x-q)**2).
         """
-        delta = self.qgrid[:, None, :] - self.qgrid[None, :, :]    # (N, N, D)
-        exponent = -0.5 * torch.sum(self.alpha * delta**2, dim=2)  # (N, N)
-        self.s_nucl = torch.exp(exponent)
+        delta = self.qgrid[:, None, :] - self.qgrid[None, :, :] # (N, N, D)
+        alpha_i = self.alpha[:, None, :]                        # (N, 1, D)
+        alpha_j = self.alpha[None, :, :]                        # (1, N, D)
+        alpha_sum = alpha_i + alpha_j                           # (N, N, D)
+        beta = alpha_i * alpha_j / alpha_sum                    # (N, N, D)
+        prefactor = torch.sqrt(2.0 * torch.sqrt(alpha_i * alpha_j) / alpha_sum)
+        exponent = -torch.sum(beta * delta**2, dim=2)           # (N, N)
+        self.s_nucl = torch.prod(prefactor, dim=2).to(torch.cdouble) * torch.exp(exponent).to(torch.cdouble)
 
     def chi_kinetic(self):
         """
         Compute nuclear kinetic energy matrix t_nucl[i,j] = <g(x; qgrid[i]) | T | g(x; qgrid[j])>,
         with T = \sum_{\nu} -0.5* m_ν^{-1} \partial^{2}/\partial x_{\nu}^2.
         """
-        delta = self.qgrid[:, None, :] - self.qgrid[None, :, :]               # (N, N, D)
-        tau = self.alpha / (2.0 * self.mass) * (1.0 - self.alpha * delta**2)  # (N, N, D)
-        tau_sum = torch.sum(tau, dim=2)                                       # (N, N)
+        delta = self.qgrid[:, None, :] - self.qgrid[None, :, :] # (N, N, D)
+        alpha_i = self.alpha[:, None, :]                        # (N, 1, D)
+        alpha_j = self.alpha[None, :, :]                        # (1, N, D)
+        beta = alpha_i * alpha_j / (alpha_i + alpha_j)          # (N, N, D)
+        tau = beta / self.mass * (1.0 - 2.0 * beta * delta**2)  # (N, N, D)
+        tau_sum = torch.sum(tau, dim=2)                         # (N, N)
     
-        self.t_nucl = self.s_nucl * tau_sum                                   # (N, N)
+        self.t_nucl = self.s_nucl * tau_sum.to(torch.cdouble)   # (N, N)
 
     def build_compound_overlap(self):
         """
@@ -200,24 +208,27 @@ class ldr_solver:
         """
         N, ist = self.ngrids, self.istate
 
-        q0     = self.q0.to(torch.cdouble)
-        p0     = self.p0.to(torch.cdouble)
+        q0     = self.q0.reshape(-1).to(torch.cdouble)
+        p0     = self.p0.reshape(-1).to(torch.cdouble)
         qgrid  = self.qgrid.to(torch.cdouble)
         alpha  = self.alpha.to(torch.cdouble)
 
-        s_q = (1.0 / (self.k*self.mass) ) ** 0.25
-        alpha0 = 1 / ( 2 * s_q **2 )
-        alpha0 = alpha0.to(torch.cdouble)
+        k = self.k.reshape(-1)
+        mass = self.mass.reshape(-1)
+        s_q = (1.0 / (k * mass)) ** 0.25
+        alpha0 = (1 / (2 * s_q ** 2)).to(torch.cdouble)
 
-        # Width matrix
-        Ag, A = torch.diag(2.j * self.alpha), torch.diag(2.j * alpha0)
-        delta_A = A - Ag.conj()
-        delta_A_inv = torch.torch.linalg.inv(delta_A)
+        # Width matrix of the initial wavepacket
+        A = torch.diag(2.j * alpha0)
 
         # Compute Gaussian nuclear wavefunction at each grid point
         for n in range(N):
             index = ist * N + n
-    
+
+            Ag = torch.diag(2.j * alpha[n])
+            delta_A = A - Ag.conj()
+            delta_A_inv = torch.linalg.inv(delta_A)
+
             xi0, xig = p0 - torch.matmul(A, q0), -torch.matmul(Ag, qgrid[n])
             delta_xi = xi0 - xig.conj()
             delta_eta = -0.5 * torch.dot(xi0 + p0, q0) + 0.5 * torch.dot(xig, qgrid[n]).conj()
@@ -424,4 +435,3 @@ class ldr_solver:
         print("Propagating Coefficients")
         self.propagate()
         self.save()
-
