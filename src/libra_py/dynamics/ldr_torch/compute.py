@@ -11,12 +11,9 @@
 .. module:: compute
    :platform: Unix, Windows
    :synopsis: This module implements functions for doing local diabatic representation (LDR) dynamics with PyTorch
-       List of functions:
-           * sech # temporary here
-           * Martens_model # temporary here
-           * gaussian_wavepacket
        List of classes:
-           * ldr_solver
+           * ldr_tdse_solver_multistate
+           * ldr_solver (compatibility alias)
 
 .. moduleauthor:: Daeho Han and Alexey V. Akimov
 
@@ -35,38 +32,81 @@ __url__ = "https://github.com/Quantum-Dynamics-Hub/libra-code"
 
 import torch
 
+from . import electronic
 
-class ldr_solver:
-    """Dynamics in a fixed, nonorthogonal Gaussian/electronic basis.
 
-    ``elec_ampl[j, n]`` is the overlap of electronic basis state ``(j, n)``
-    with the desired initial electronic state, not an expansion coefficient.
-    Supply all states, shape ``(nstates, ngrids)``, for a fixed electronic
-    reference state. A legacy vector of shape ``(ngrids,)`` supplies overlaps
-    only in ``istate``; omitted overlaps are zero. The default assumes
-    coordinate-independent orthonormal electronic states.
+class ldr_tdse_solver_multistate:
+    """LDR dynamics driven by a diabatic model function, as in exact_torch.
 
-    ``alpha`` contains positive Gaussian exponents: a scalar or a vector
-    of length ``ndof`` gives uniform widths; shape ``(ngrids, ndof)`` gives
-    a separate width for each center and dimension. A one-element vector
-    broadcasts over dimensions. The nuclear basis functions are normalized.
+    Supply ``potential_fn(q, potential_fn_params)`` returning shape
+    (npoints, nstates, nstates) for q of shape (ndof, npoints). Libra prepares
+    reference energies, eigenvectors, electronic overlaps, and initial
+    electronic overlaps in a fixed orthonormal diabatic model basis.
 
-    Energies have shape ``(nstates, ngrids)`` and electronic overlaps have
-    shape ``(nstates * ngrids, nstates * ngrids)``, in state-major order.
-    Inputs are converted to float64/complex128 on ``device``.
+    ``qgrid`` has shape (ngrids, ndof). Alternatively, ``grid_size``, ``q_min``
+    and ``q_max`` define a regular grid with both endpoints included.
+    ``alpha`` is a positive scalar, dimension vector, or (ngrids, ndof) array.
+    ``Nstates`` and ``initial_state_index`` follow the exact_torch names;
+    ``nstates`` and ``istate`` remain accepted aliases.
+
+    The initial nuclear state is the analytic Gaussian specified by q0, p0,
+    k and mass. Its electronic state is the selected adiabatic eigenvector
+    at q0, held fixed across the Gaussian. ``initial_electronic_state`` may
+    instead supply a vector in the model's diabatic basis.
+
+    Schemes: diagonal, BAT0 (alias symmetrized, the default), BAT1, midpoint.
+    BAT1 computes energy gradients at the reference geometries from
+    ``potential_fn`` using Torch autograd in a separate helper. The model
+    must preserve the computational graph from coordinates to potential.
+    Midpoint always evaluates potential_fn at Gaussian-weighted midpoints
+    through a separate helper; ``midpoint_batch_size`` defaults to 256.
+
+    Existing calls with precomputed E, s_elec and elec_ampl remain supported
+    when potential_fn is omitted. These arrays use state-major order.
+    ``ldr_solver`` remains an alias for this class.
     """
 
     def __init__(self, params):
+        params = dict(params)
+        for preferred, legacy in (("Nstates", "nstates"), ("initial_state_index", "istate")):
+            if preferred in params and legacy in params and params[preferred] != params[legacy]:
+                raise ValueError(f"Conflicting {preferred} and {legacy}")
+            if preferred in params:
+                params[legacy] = params[preferred]
         self.prefix = params.get("prefix", "ldr-solution")
         self.device = torch.device(params.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
         self.hbar = 1.0
-        self.hamiltonian_scheme = "symmetrized"
+        self.hamiltonian_scheme = params.get("hamiltonian_scheme", "symmetrized")
+        self.dE = params.get("dE")
+        self.potential_fn = params.get("potential_fn")
+        self.potential_fn_params = params.get("potential_fn_params", {})
+        if "potential_gradient_fn" in params:
+            raise ValueError("BAT1 uses autograd with potential_fn; remove potential_gradient_fn")
+        self.eigvecs = None
+        self.midpoint_batch_size = params.get("midpoint_batch_size", 256)
         self.q0 = torch.as_tensor(params.get("q0", [0.0]), dtype=torch.float64, device=self.device)
         self.p0 = torch.as_tensor(params.get("p0", [0.0]), dtype=torch.float64, device=self.device)
         self.k = torch.as_tensor(params.get("k", [0.001]), dtype=torch.float64, device=self.device)
         self.mass = torch.as_tensor(params.get("mass", [2000.0]), dtype=torch.float64, device=self.device)
         self.alpha = torch.as_tensor(params.get("alpha", [18.0]), dtype=torch.float64, device=self.device)
-        self.qgrid = torch.as_tensor(params.get("qgrid", [[-10 + i * 0.1] for i in range(int((10 - (-10)) / 0.1) + 1)] ), dtype=torch.float64, device=self.device) #(N, D)
+        if "grid_size" in params:
+            if "qgrid" in params:
+                raise ValueError("Supply qgrid or grid_size, not both")
+            sizes, lower, upper = params["grid_size"], params.get("q_min"), params.get("q_max")
+            if lower is None or upper is None or not (len(sizes) == len(lower) == len(upper)):
+                raise ValueError("grid_size, q_min and q_max must have the same length")
+            if not sizes or any(not isinstance(n, int) or n < 1 for n in sizes):
+                raise ValueError("grid_size must contain positive integers")
+            if any(hi <= lo for lo, hi in zip(lower, upper)):
+                raise ValueError("q_max must exceed q_min in every dimension")
+            axes = [torch.linspace(lo, hi, n, dtype=torch.float64, device=self.device)
+                    for lo, hi, n in zip(lower, upper, sizes)]
+            params["qgrid"] = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1).reshape(-1, len(sizes))
+        self.qgrid = torch.as_tensor(
+            params.get("qgrid", [[-10 + i*0.1] for i in range(201)]),
+            dtype=torch.float64, device=self.device)
+        if self.qgrid.ndim != 2 or min(self.qgrid.shape) < 1 or not torch.isfinite(self.qgrid).all():
+            raise ValueError("qgrid must be a finite, nonempty (ngrids, ndof) array")
         self.ngrids = len(self.qgrid) # N
         self.ndof = self.qgrid.shape[1] 
         if not torch.all(torch.isfinite(self.alpha) & (self.alpha > 0)):
@@ -83,6 +123,21 @@ class ldr_solver:
         self.istate = params.get("istate", 0)
         if not 0 <= self.istate < self.nstates:
             raise ValueError("istate must index one of nstates electronic states")
+        self.Nstates, self.initial_state_index = self.nstates, self.istate
+        if self.potential_fn is not None:
+            array_keys = {"E", "s_elec", "elec_ampl", "dE", "midpoint_potential", "midpoint_evaluator"}
+            if array_keys.intersection(params):
+                raise ValueError("potential_fn generates electronic data; remove precomputed electronic inputs")
+            with torch.no_grad():
+                E, self.eigvecs, se, ampl = electronic.prepare_reference_data(
+                    self.qgrid, self.q0, self.nstates, self.istate,
+                    self.potential_fn, self.potential_fn_params, params.get("initial_electronic_state"))
+            params.update(E=E, s_elec=se, elec_ampl=ampl)
+            if self.hamiltonian_scheme == "BAT1":
+                if torch.any((E[1:] - E[:-1]).abs() < 1e-12):
+                    raise ValueError("BAT1 energy gradients are not unique at an electronic degeneracy")
+                self.dE = electronic.compute_energy_gradients(
+                    self.qgrid, self.eigvecs, self.potential_fn, self.potential_fn_params)
         amplitudes = torch.as_tensor(
             params.get("elec_ampl", torch.ones(self.ngrids)),
             dtype=torch.cdouble, device=self.device,
@@ -204,37 +259,75 @@ class ldr_solver:
         self.S = S_4d.reshape(ndim, ndim)
 
     def build_compound_hamiltonian(self):
-        """
-        Build the compound nuclear-electronic Hamiltonian self.H (ndim, ndim) using different schemes.
+        """Build H = T + V using the selected potential approximation.
+
+        Both nuclear integrals must be built before calling this method.
+        Composite indices are state-major: (i,n) -> i*ngrids+n.
         """
         N, s, ndim = self.ngrids, self.nstates, self.ndim
         scheme = self.hamiltonian_scheme
-        s_elec_4d = self.s_elec.view(s, N, s, N)      # (s, N, s, N)
-        T_4d = self.t_nucl[None, :, None, :]          # (1, N, 1, N)
-        S_4d = self.s_nucl[None, :, None, :]          # (1, N, 1, N)
-    
-        if scheme == 'as_is': # For showing the original non-Hermitian form, not intended to use
-            E_j_4d = self.E[None, None, :, :]   # (1, 1, s, N)
-            bracket_4d = T_4d + E_j_4d * S_4d
-        elif scheme == 'symmetrized':
-            E_i_4d = self.E[:, :, None, None]   # (s, N, 1, 1)
-            E_j_4d = self.E[None, None, :, :]   # (1, 1, s, N)
-            E_avg_4d = 0.5 * (E_i_4d + E_j_4d)  # (s, N, s, N)
-            bracket_4d = T_4d + E_avg_4d * S_4d
-        elif scheme == 'diagonal':
-            # Build Kronecker deltas for electronic and nuclear indices
-            delta_ij = torch.eye(s, device=self.device)[:, None, :, None]  # (s, 1, s, 1)
-            delta_nm = torch.eye(N, device=self.device)[None, :, None, :]  # (1, N, 1, N)
-            delta_4d = delta_ij * delta_nm
-            
-            E_j_4d = self.E[None, None, :, :] # (1, 1, s, N)
-            bracket_4d = T_4d + E_j_4d * S_4d * delta_4d
+        s_elec_4d = self.s_elec.view(s, N, s, N)
+        T_4d = self.t_nucl[None, :, None, :]
+        S_4d = self.s_nucl[None, :, None, :]
 
+        if scheme == 'diagonal':
+            # Only V is diagonal; retain all kinetic couplings.
+            self.H = (s_elec_4d * T_4d).reshape(ndim, ndim)
+            self.H.diagonal().add_(self.E.reshape(ndim))
+            return
+        if scheme == 'midpoint':
+            self.H = self._midpoint_hamiltonian(s_elec_4d)
+            return
+        if scheme == 'as_is':
+            # Legacy, generally non-Hermitian form, retained for comparison.
+            E_pair = self.E[None, None, :, :]
+        elif scheme in ['symmetrized', 'BAT0']:
+            E_pair = 0.5 * (self.E[:, :, None, None] + self.E[None, None, :, :])
+        elif scheme == 'BAT1':
+            E_pair = 0.5 * (self.E[:, :, None, None] + self.E[None, None, :, :])
+            gradients = self._reference_energy_gradients()
+            # Accumulate one coordinate at a time without allocating an
+            # (nstates, N, nstates, N, ndof) intermediate.
+            for a in range(self.ndof):
+                an = self._alpha_grid[:, None, a]
+                am = self._alpha_grid[None, :, a]
+                delta = self.qgrid[None, :, a] - self.qgrid[:, None, a]
+                # qbar-q_n and qbar-q_m, with center-dependent widths.
+                from_bra = am / (an + am) * delta
+                from_ket = -an / (an + am) * delta
+                E_pair += 0.5 * (
+                    gradients[:, :, a][:, :, None, None]
+                    * from_bra[None, :, None, :]
+                    + gradients[:, :, a][None, None, :, :]
+                    * from_ket[None, :, None, :]
+                )
         else:
             raise ValueError(f"Unknown Hamiltonian scheme: {scheme}")
-    
-        H_4d = s_elec_4d * bracket_4d
-        self.H = H_4d.reshape(ndim, ndim)
+
+        self.H = (s_elec_4d * (T_4d + E_pair * S_4d)).reshape(ndim, ndim)
+
+    def _reference_energy_gradients(self):
+        """Validate BAT1 gradients at q_n (energy gradients, not forces)."""
+        if self.dE is None:
+            raise ValueError("BAT1 requires dE at the reference geometries")
+        gradients = torch.as_tensor(self.dE, dtype=torch.cdouble, device=self.device)
+        if gradients.shape != (self.nstates, self.ngrids, self.ndof):
+            raise ValueError("dE must have shape (nstates, ngrids, ndof)")
+        if torch.any(gradients.imag != 0) or not torch.all(torch.isfinite(gradients)):
+            raise ValueError("dE must contain finite real energy gradients")
+        self.dE = gradients.real.to(dtype=torch.float64)
+        return self.dE
+
+    def _midpoint_hamiltonian(self, s_elec_4d):
+        """Build the midpoint matrix using the same model as at the centers."""
+        if self.potential_fn is None:
+            raise ValueError("midpoint requires potential_fn")
+        reduced = electronic.compute_midpoint_potential(
+            self.qgrid, self._alpha_grid, self.eigvecs, self.potential_fn,
+            self.potential_fn_params, self.midpoint_batch_size)
+        H = s_elec_4d * self.t_nucl[None, :, None, :]
+        H += reduced * self.s_nucl[None, :, None, :]
+        return H.reshape(self.ndim, self.ndim)
 
     def compute_propagator(self):
         """
@@ -387,23 +480,12 @@ class ldr_solver:
     
     
     def compute_potential_energy(self):
+        """Return <V> = <H> - <T> for the Hamiltonian actually built.
+
+        This follows the selected scheme without storing another dense
+        compound matrix or repeating expensive midpoint evaluations.
         """
-        Compute potential energy as C^+ V C / C^+ S C for a single step.
-        """
-        N, s, ndim = self.ngrids, self.nstates, self.ndim
-    
-        s_elec_4d = self.s_elec.view(s, N, s, N)
-        S_4d = self.s_nucl[None, :, None, :]
-        E_j_4d = self.E[None, None, :, :]  # (1,1,j,m)
-    
-        V_compound = (s_elec_4d * (E_j_4d * S_4d)).reshape(ndim, ndim)
-    
-        C_vec = self.C_curr
-    
-        numer = torch.vdot(C_vec, V_compound @ C_vec).real
-        denom = torch.vdot(C_vec, self.S @ C_vec).real
-    
-        return numer / denom
+        return self.compute_total_energy() - self.compute_kinetic_energy()
     
     
     def compute_total_energy(self):
@@ -457,12 +539,14 @@ class ldr_solver:
                      "t_nucl":self.t_nucl,
                      "E":self.E,
                      "s_elec":self.s_elec,
+                     "eigvecs": self.eigvecs,
                      "S":self.S,
                      "H":self.H,
                      "U":self.U,
                      "C_save":self.C_save,
                      "save_every_n_steps":self.save_every_n_steps,
                      "hamiltonian_scheme": self.hamiltonian_scheme,
+                     "dE": self.dE,
                      "dt":self.dt, "nsteps":self.nsteps,
                      "time":self.time,
                      "kinetic_energy":self.kinetic_energy,
@@ -480,13 +564,19 @@ class ldr_solver:
         self.build_compound_overlap()
         self.build_compound_hamiltonian()
     
-    def solve(self):
-        print("Building overlap and Hamiltonian matrices")
+    def initialize_operators(self):
+        """Build the LDR matrices and propagator, then project the initial state."""
         self.buildSH()
-        print("Computing the time propagator")
         self.compute_propagator()
-        print("Initializing Coefficients")
         self.initialize_C()
+
+    def solve(self):
+        print("Building LDR matrices and initializing the state")
+        self.initialize_operators()
         print("Propagating Coefficients")
         self.propagate()
         self.save()
+
+
+# Preserve the established entry point for existing calculation scripts.
+ldr_solver = ldr_tdse_solver_multistate
