@@ -13,7 +13,6 @@
    :synopsis: This module implements functions for doing local diabatic representation (LDR) dynamics with PyTorch
        List of classes:
            * ldr_tdse_solver_multistate
-           * ldr_solver (compatibility alias)
 
 .. moduleauthor:: Daeho Han and Alexey V. Akimov
 
@@ -63,7 +62,6 @@ class ldr_tdse_solver_multistate:
 
     Existing calls with precomputed E, s_elec and elec_ampl remain supported
     when potential_fn is omitted. These arrays use state-major order.
-    ``ldr_solver`` remains an alias for this class.
     """
 
     def __init__(self, params):
@@ -576,7 +574,3 @@ class ldr_tdse_solver_multistate:
         print("Propagating Coefficients")
         self.propagate()
         self.save()
-
-
-# Preserve the established entry point for existing calculation scripts.
-ldr_solver = ldr_tdse_solver_multistate
