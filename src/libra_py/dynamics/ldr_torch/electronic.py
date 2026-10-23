@@ -34,12 +34,12 @@ def diagonalize_potential(q, potential_fn, model_params, nstates):
 
 
 def prepare_reference_data(qgrid, q0, nstates, istate, potential_fn, model_params,
-                           initial_electronic_state=None, initial_representation="adiabatic"):
+                           initial_electronic_state=None, initial_representation="diabatic"):
     """Build local energies, frames, overlaps, and initial electronic overlaps.
 
-    initial_representation selects the adiabatic eigenstate istate at q0
-    (the default) or the diabatic basis state istate. The selected vector
-    is held fixed across the initial nuclear Gaussian. An explicit
+    initial_representation selects how to prepare the initial electronic state:
+    the adiabatic eigenstate `istate` at q0 or the diabatic basis state `istate` (the default). 
+    The selected vector is held fixed across the initial nuclear Gaussian. An explicit
     initial_electronic_state overrides this choice and is always interpreted
     in the model's diabatic basis, then normalized.
     """
