@@ -83,7 +83,7 @@ class ldr_tdse_solver_multistate:
         self.dE = params.get("dE")
         self.potential_fn = params.get("potential_fn")
         self.potential_fn_params = params.get("potential_fn_params", {})
-        self.initial_representation = params.get("initial_representation", "adiabatic")
+        self.initial_representation = params.get("initial_representation", "diabatic")
         if self.potential_fn is None and "initial_representation" in params:
             raise ValueError("initial_representation requires potential_fn; "
                              "use elec_ampl with precomputed electronic data")
