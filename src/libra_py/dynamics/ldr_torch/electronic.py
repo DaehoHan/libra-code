@@ -34,19 +34,27 @@ def diagonalize_potential(q, potential_fn, model_params, nstates):
 
 
 def prepare_reference_data(qgrid, q0, nstates, istate, potential_fn, model_params,
-                           initial_electronic_state=None):
+                           initial_electronic_state=None, initial_representation="adiabatic"):
     """Build local energies, frames, overlaps, and initial electronic overlaps.
 
-    The default initial electronic state is the adiabatic eigenstate istate
-    at q0, held fixed across the initial nuclear Gaussian. An explicit
-    initial_electronic_state instead supplies a vector in the diabatic basis.
+    initial_representation selects the adiabatic eigenstate istate at q0
+    (the default) or the diabatic basis state istate. The selected vector
+    is held fixed across the initial nuclear Gaussian. An explicit
+    initial_electronic_state overrides this choice and is always interpreted
+    in the model's diabatic basis, then normalized.
     """
+    if initial_representation not in ("adiabatic", "diabatic"):
+        raise ValueError("initial_representation must be 'adiabatic' or 'diabatic'")
     energies, frames = diagonalize_potential(qgrid.T, potential_fn, model_params, nstates)
     if initial_electronic_state is None:
-        if q0.shape != (qgrid.shape[1],):
-            raise ValueError("q0 must have shape (ndof,)")
-        _, initial_frames = diagonalize_potential(q0[:, None], potential_fn, model_params, nstates)
-        initial = initial_frames[0, :, istate]
+        if initial_representation == "diabatic":
+            initial = torch.zeros(nstates, dtype=torch.cdouble, device=qgrid.device)
+            initial[istate] = 1.0
+        else:
+            if q0.shape != (qgrid.shape[1],):
+                raise ValueError("q0 must have shape (ndof,)")
+            _, initial_frames = diagonalize_potential(q0[:, None], potential_fn, model_params, nstates)
+            initial = initial_frames[0, :, istate]
     else:
         initial = torch.as_tensor(initial_electronic_state, dtype=torch.cdouble, device=qgrid.device)
         if initial.shape != (nstates,) or not torch.isfinite(initial).all():

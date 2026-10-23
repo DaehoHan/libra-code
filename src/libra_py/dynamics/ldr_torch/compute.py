@@ -49,9 +49,14 @@ class ldr_tdse_solver_multistate:
     ``nstates`` and ``istate`` remain accepted aliases.
 
     The initial nuclear state is the analytic Gaussian specified by q0, p0,
-    k and mass. Its electronic state is the selected adiabatic eigenvector
-    at q0, held fixed across the Gaussian. ``initial_electronic_state`` may
-    instead supply a vector in the model's diabatic basis.
+    k and mass. With potential_fn, ``initial_representation="adiabatic"``
+    (the default) selects the adiabatic eigenvector at q0; ``"diabatic"``
+    selects a unit vector in the model's diabatic basis. Both use
+    ``initial_state_index`` and hold the electronic vector fixed across the
+    Gaussian. This is not a locally adiabatic state at every coordinate.
+    ``initial_electronic_state`` overrides this selection with a normalized
+    vector supplied in the model's diabatic basis, regardless of
+    ``initial_representation``.
 
     Schemes: diagonal, BAT0 (alias symmetrized, the default), BAT1, midpoint.
     BAT1 computes energy gradients at the reference geometries from
@@ -78,6 +83,10 @@ class ldr_tdse_solver_multistate:
         self.dE = params.get("dE")
         self.potential_fn = params.get("potential_fn")
         self.potential_fn_params = params.get("potential_fn_params", {})
+        self.initial_representation = params.get("initial_representation", "adiabatic")
+        if self.potential_fn is None and "initial_representation" in params:
+            raise ValueError("initial_representation requires potential_fn; "
+                             "use elec_ampl with precomputed electronic data")
         if "potential_gradient_fn" in params:
             raise ValueError("BAT1 uses autograd with potential_fn; remove potential_gradient_fn")
         self.eigvecs = None
@@ -129,7 +138,8 @@ class ldr_tdse_solver_multistate:
             with torch.no_grad():
                 E, self.eigvecs, se, ampl = electronic.prepare_reference_data(
                     self.qgrid, self.q0, self.nstates, self.istate,
-                    self.potential_fn, self.potential_fn_params, params.get("initial_electronic_state"))
+                    self.potential_fn, self.potential_fn_params, params.get("initial_electronic_state"),
+                    initial_representation=self.initial_representation)
             params.update(E=E, s_elec=se, elec_ampl=ampl)
             if self.hamiltonian_scheme == "BAT1":
                 if torch.any((E[1:] - E[:-1]).abs() < 1e-12):
