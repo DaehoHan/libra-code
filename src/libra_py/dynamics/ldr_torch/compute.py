@@ -45,8 +45,7 @@ class ldr_tdse_solver_multistate:
     ``qgrid`` has shape (ngrids, ndof). Alternatively, ``grid_size``, ``q_min``
     and ``q_max`` define a regular grid with both endpoints included.
     ``alpha`` is a positive scalar, dimension vector, or (ngrids, ndof) array.
-    ``Nstates`` and ``initial_state_index`` follow the exact_torch names;
-    ``nstates`` and ``istate`` remain accepted aliases.
+    ``Nstates`` and ``initial_state_index`` follow the exact_torch names.
 
     The initial nuclear state is the analytic Gaussian specified by q0, p0,
     k and mass. With potential_fn, ``initial_representation="adiabatic"``
@@ -78,11 +77,8 @@ class ldr_tdse_solver_multistate:
 
     def __init__(self, params):
         params = dict(params)
-        for preferred, legacy in (("Nstates", "nstates"), ("initial_state_index", "istate")):
-            if preferred in params and legacy in params and params[preferred] != params[legacy]:
-                raise ValueError(f"Conflicting {preferred} and {legacy}")
-            if preferred in params:
-                params[legacy] = params[preferred]
+        if "nstates" in params or "istate" in params:
+            raise ValueError("Use Nstates and initial_state_index as parameter names")
         self.prefix = params.get("prefix", "ldr-solution")
         self.device = torch.device(params.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
         self.hbar = 1.0
@@ -133,10 +129,10 @@ class ldr_tdse_solver_multistate:
         else:
             raise ValueError("alpha must be scalar, have shape (ndof,), "
                              "or have shape (ngrids, ndof)")
-        self.nstates = params.get("nstates", 2)
-        self.istate = params.get("istate", 0)
+        self.nstates = params.get("Nstates", 2)
+        self.istate = params.get("initial_state_index", 0)
         if not 0 <= self.istate < self.nstates:
-            raise ValueError("istate must index one of nstates electronic states")
+            raise ValueError("initial_state_index must index one of Nstates electronic states")
         self.Nstates, self.initial_state_index = self.nstates, self.istate
         if self.potential_fn is not None:
             array_keys = {"E", "s_elec", "elec_ampl", "dE", "midpoint_potential", "midpoint_evaluator"}

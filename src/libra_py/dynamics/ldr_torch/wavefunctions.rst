@@ -15,7 +15,7 @@ Attribute          Shape      Meaning
 =================  =========  =====================================================
 
 P is ``ngrids``: amplitudes are always evaluated at the given ``qgrid``.
-M is ``nstates``, and T is the number of saved steps, including step zero.
+M is the ``Nstates`` constructor option, and T is the number of saved steps, including step zero.
 The amplitude arrays are ordinary tensors. Amplitude histories are allocated only when requested; otherwise they are ``None``.
 Both ``rho_*_all`` attributes are initialized to ``None`` and are not
 calculated during propagation. Their calculation is deferred until a

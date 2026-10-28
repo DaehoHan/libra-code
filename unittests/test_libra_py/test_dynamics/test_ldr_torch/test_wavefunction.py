@@ -154,7 +154,7 @@ def test_default_save_has_final_amplitudes_without_histories(tmp_path):
 
 def test_legacy_overlaps_support_native_adiabatic_projection(tmp_path):
     full = make_solver()
-    params = dict(device="cpu", nstates=2, qgrid=full.qgrid, alpha=full.alpha,
+    params = dict(device="cpu", Nstates=2, qgrid=full.qgrid, alpha=full.alpha,
                   q0=full.q0, p0=full.p0, k=full.k, mass=full.mass,
                   E=full.E, s_elec=full.s_elec, elec_ampl=full.elec_ampl,
                   prefix=str(tmp_path / "legacy"), properties_to_save=["psi_r_adi"])
