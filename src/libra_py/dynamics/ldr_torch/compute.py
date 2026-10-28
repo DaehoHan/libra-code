@@ -67,6 +67,13 @@ class ldr_tdse_solver_multistate:
 
     Existing calls with precomputed E, s_elec and elec_ampl remain supported
     when potential_fn is omitted. These arrays use state-major order.
+
+    ``psi_r_dia`` and ``psi_r_adi`` are ordinary (ngrids, nstates) arrays
+    evaluated on qgrid. Enable their (T, ngrids, nstates) histories with
+    "psi_r_dia" and "psi_r_adi" in properties_to_save. ``rho_dia_all`` and
+    ``rho_adi_all`` are initialized to None as placeholders for a future
+    electronic density-matrix calculation. Spatial densities are abs(psi)**2.
+    Without potential_fn, only native-center adiabatic amplitudes exist.
     """
 
     def __init__(self, params):
@@ -212,6 +219,76 @@ class ldr_tdse_solver_multistate:
         self.denmat = []
         self.norm = []
         self.C_save = []
+
+        self.psi_batch_size = params.get("psi_batch_size", 256)
+        if (isinstance(self.psi_batch_size, bool)
+                or not isinstance(self.psi_batch_size, int) or self.psi_batch_size < 1):
+            raise ValueError("psi_batch_size must be a positive integer")
+        if self.eigvecs is None and "psi_r_dia" in self.properties_to_save:
+            raise ValueError("Diabatic amplitudes require potential_fn")
+
+        shape = (self.ngrids, self.nstates)
+        nsnaps = len(range(0, self.nsteps, self.save_every_n_steps))
+        self.psi_r_dia = (torch.zeros(shape, dtype=torch.cdouble, device=self.device)
+                          if self.eigvecs is not None else None)
+        self.psi_r_adi = torch.zeros(shape, dtype=torch.cdouble, device=self.device)
+        self.psi_r_dia_all = (torch.zeros((nsnaps, *shape), dtype=torch.cdouble, device=self.device)
+                              if "psi_r_dia" in self.properties_to_save else None)
+        self.psi_r_adi_all = (torch.zeros((nsnaps, *shape), dtype=torch.cdouble, device=self.device)
+                              if "psi_r_adi" in self.properties_to_save else None)
+        self.rho_dia_all = None
+        self.rho_adi_all = None
+
+    def update_psi_r(self):
+        """Reconstruct both (ngrids, nstates) amplitudes on qgrid.
+
+        Coefficients are state-major: C_curr[i*N+n]. Eigenvector columns
+        eigvecs[n,a,i] are <diabatic_a|adiabatic_i(q_n)>. Sum every center
+        and reference state in the common diabatic frame, then project onto
+        each local adiabatic frame. No renormalization is applied.
+
+        Called during initialization, when saving histories, and at the end
+        of propagation. Call explicitly after manually editing C_curr.
+        The basis, model, and qgrid remain fixed during a run.
+        """
+        N, M = self.ngrids, self.nstates
+        batch_size = self.psi_batch_size
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("psi_batch_size must be a positive integer")
+        coefficients = torch.as_tensor(self.C_curr, dtype=torch.cdouble, device=self.device)
+        if coefficients.shape != (M*N,) or not torch.isfinite(coefficients).all():
+            raise ValueError("coefficients must be a finite state-major vector of size M*N")
+        c = coefficients.reshape(M, N)
+        alpha = self._alpha_grid
+        prefactor = (2 * alpha / torch.pi).pow(0.25).prod(dim=1)
+        if self.eigvecs is None:
+            # Precomputed overlaps suffice for the native adiabatic projection.
+            # They do not specify a named common diabatic frame.
+            if self.s_elec is None:
+                raise ValueError("Electronic overlaps are required without reference frames")
+            overlaps = self.s_elec.reshape(M, N, M, N)
+            psi_dia = None
+        else:
+            if self.eigvecs.shape != (N, M, M):
+                raise ValueError("reference_frames must have shape (N, M, M)")
+            center_vectors = torch.einsum("nai,in->na", self.eigvecs, c)
+            psi_dia = torch.empty(N, M, dtype=torch.cdouble, device=self.device)
+        psi_adi = torch.empty(N, M, dtype=torch.cdouble, device=self.device)
+        for start in range(0, N, batch_size):
+            stop = min(start + batch_size, N)
+            delta = self.qgrid[start:stop, None, :] - self.qgrid[None, :, :]
+            # Normalized Gaussian g_n(q_p); temporary arrays are bounded by batch_size.
+            kernels = prefactor[None, :] * torch.exp(-(alpha[None, :, :] * delta.square()).sum(-1))
+            kernels = kernels.to(torch.cdouble)
+            if psi_dia is None:
+                psi_adi[start:stop] = torch.einsum(
+                    "kpin,pn,in->pk", overlaps[:, start:stop, :, :], kernels, c)
+            else:
+                psi_dia[start:stop] = kernels @ center_vectors
+                psi_adi[start:stop] = torch.einsum(
+                    "pak,pa->pk", self.eigvecs[start:stop].conj(), psi_dia[start:stop])
+        self.psi_r_dia, self.psi_r_adi = psi_dia, psi_adi
+        return self.psi_r_dia, self.psi_r_adi
 
     def chi_overlap(self):
         """
@@ -403,6 +480,8 @@ class ldr_tdse_solver_multistate:
         if not torch.isfinite(norm_squared) or norm_squared <= 0:
             raise ValueError("The initial state must have a finite, nonzero projected norm")
         self.C0 = coefficients / norm_squared.sqrt()
+        self.C_curr = self.C0.clone()
+        self.update_psi_r()
     
     def propagate(self):
         """
@@ -421,9 +500,12 @@ class ldr_tdse_solver_multistate:
             if step % self.save_every_n_steps == 0:
                 print(F"step = {step}")
                 self.save_results(step)
+        self.update_psi_r()
 
     def save_results(self, step):
-        if "time" in self.properties_to_save:
+        save_wavefunction = bool({"psi_r_dia", "psi_r_adi"}.intersection(
+            self.properties_to_save))
+        if "time" in self.properties_to_save or save_wavefunction:
             self.time.append(step*self.dt)
         if "norm" in self.properties_to_save:
             overlap = torch.matmul(self.S, self.C_curr)
@@ -442,7 +524,14 @@ class ldr_tdse_solver_multistate:
             self.average_pos.append(self.compute_average_pos())
         if "C_save" in self.properties_to_save:
             self.C_save.append(self.C_curr)
-        
+        if save_wavefunction:
+            self.update_psi_r()
+            isnap = step // self.save_every_n_steps
+            if self.psi_r_dia_all is not None:
+                self.psi_r_dia_all[isnap] = self.psi_r_dia
+            if self.psi_r_adi_all is not None:
+                self.psi_r_adi_all[isnap] = self.psi_r_adi
+
     def compute_populations(self):
         """Return the diagonal of the Lowdin electronic density matrix.
 
@@ -535,6 +624,7 @@ class ldr_tdse_solver_multistate:
         return avg_q
 
     def save(self):
+        self.update_psi_r()
         torch.save( {"q0":self.q0,
                      "p0":self.p0,
                      "k":self.k,
@@ -548,6 +638,12 @@ class ldr_tdse_solver_multistate:
                      "E":self.E,
                      "s_elec":self.s_elec,
                      "eigvecs": self.eigvecs,
+                     "psi_r_dia": self.psi_r_dia,
+                     "psi_r_adi": self.psi_r_adi,
+                     "psi_r_dia_all": self.psi_r_dia_all,
+                     "psi_r_adi_all": self.psi_r_adi_all,
+                     "rho_dia_all": self.rho_dia_all,
+                     "rho_adi_all": self.rho_adi_all,
                      "S":self.S,
                      "H":self.H,
                      "U":self.U,
